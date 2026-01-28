@@ -1,0 +1,419 @@
+import React, { useState, useRef } from 'react';
+import { Upload, FileText, Download, AlertCircle, Lock, LogOut, Eye, EyeOff, Trash2 } from 'lucide-react';
+
+export default function PassportScanner() {
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [passportData, setPassportData] = useState([]);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [error, setError] = useState('');
+  const fileInputRef = useRef(null);
+
+  // 간단한 로그인 (실제 운영 시에는 서버 인증 필요)
+  const ADMIN_CREDENTIALS = {
+    username: 'admin',
+    password: 'travel2025!'
+  };
+
+  const handleLogin = (e) => {
+    e.preventDefault();
+    if (username === ADMIN_CREDENTIALS.username && password === ADMIN_CREDENTIALS.password) {
+      setIsAuthenticated(true);
+      setError('');
+    } else {
+      setError('아이디 또는 비밀번호가 올바르지 않습니다.');
+    }
+  };
+
+  const handleLogout = () => {
+    setIsAuthenticated(false);
+    setUsername('');
+    setPassword('');
+    setPassportData([]);
+  };
+
+  const processPassportImage = async (file) => {
+    setIsProcessing(true);
+    setError('');
+
+    try {
+      // 이미지를 base64로 변환
+      const base64Data = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result.split(',')[1]);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+
+      const mediaType = file.type;
+
+      // Claude API 호출
+      const response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-20250514',
+          max_tokens: 1000,
+          messages: [
+            {
+              role: 'user',
+              content: [
+                {
+                  type: 'image',
+                  source: {
+                    type: 'base64',
+                    media_type: mediaType,
+                    data: base64Data
+                  }
+                },
+                {
+                  type: 'text',
+                  text: `이 여권 이미지에서 다음 정보를 추출해주세요. 반드시 JSON 형식으로만 답변하고, 다른 텍스트는 포함하지 마세요:
+
+{
+  "koreanName": "한글 이름 (없으면 빈 문자열)",
+  "englishName": "영문 이름 (SURNAME, Given Names 형식)",
+  "nationality": "국적 코드 (예: KOR, USA)",
+  "issuingCountry": "여권 발행 국가 코드",
+  "dateOfBirth": "생년월일 (DD MMM YYYY 형식, 예: 15 JAN 1990)",
+  "passportNumber": "여권 번호",
+  "expiryDate": "만료일 (DD MMM YYYY 형식)"
+}
+
+정보를 찾을 수 없으면 빈 문자열("")로 표시하세요.`
+                }
+              ]
+            }
+          ]
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error('여권 정보 추출 실패');
+      }
+
+      const data = await response.json();
+      const textContent = data.content.find(item => item.type === 'text')?.text || '';
+      
+      // JSON 파싱
+      const cleanText = textContent.replace(/```json|```/g, '').trim();
+      const passportInfo = JSON.parse(cleanText);
+
+      // 만료일 체크 (6개월 미만)
+      const expiryDate = new Date(passportInfo.expiryDate);
+      const sixMonthsFromNow = new Date();
+      sixMonthsFromNow.setMonth(sixMonthsFromNow.getMonth() + 6);
+      const isExpiringSoon = expiryDate < sixMonthsFromNow;
+
+      // 데이터 추가
+      const newEntry = {
+        id: Date.now(),
+        no: passportData.length + 1,
+        koreanName: passportInfo.koreanName,
+        englishName: passportInfo.englishName,
+        nationality: passportInfo.nationality,
+        issuingCountry: passportInfo.issuingCountry,
+        dateOfBirth: passportInfo.dateOfBirth,
+        passportNumber: passportInfo.passportNumber,
+        expiryDate: passportInfo.expiryDate,
+        expiringSoon: isExpiringSoon ? '주의' : ''
+      };
+
+      setPassportData([...passportData, newEntry]);
+    } catch (err) {
+      console.error('Error:', err);
+      setError('여권 정보를 추출하는데 실패했습니다. 이미지가 선명한지 확인해주세요.');
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  const handleFileUpload = (e) => {
+    const files = Array.from(e.target.files);
+    files.forEach(file => {
+      if (file.type.startsWith('image/')) {
+        processPassportImage(file);
+      }
+    });
+  };
+
+  const handlePaste = async (e) => {
+    const items = Array.from(e.clipboardData.items);
+    for (const item of items) {
+      if (item.type.startsWith('image/')) {
+        const file = item.getAsFile();
+        await processPassportImage(file);
+      }
+    }
+  };
+
+  const handleDelete = (id) => {
+    setPassportData(passportData.filter(item => item.id !== id));
+  };
+
+  const downloadExcel = async () => {
+    try {
+      // CSV 형식으로 다운로드 (엑셀에서 열 수 있음)
+      const headers = ['No', '성명', '영문명', '국적', '여권발행국가', '생년월일(일월년)', '여권번호', '만료일(일월년)', '만료일 임박'];
+      const rows = passportData.map(item => [
+        item.no,
+        item.koreanName,
+        item.englishName,
+        item.nationality,
+        item.issuingCountry,
+        item.dateOfBirth,
+        item.passportNumber,
+        item.expiryDate,
+        item.expiringSoon
+      ]);
+
+      // BOM 추가 (한글 깨짐 방지)
+      const BOM = '\uFEFF';
+      const csvContent = BOM + [headers, ...rows].map(row => row.join(',')).join('\n');
+      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `여권스캔목록_${new Date().toISOString().split('T')[0]}.csv`;
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setError('파일 다운로드에 실패했습니다.');
+    }
+  };
+
+  // 로그인 화면
+  if (!isAuthenticated) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center p-4">
+        <div className="bg-white rounded-2xl shadow-2xl p-8 w-full max-w-md">
+          <div className="text-center mb-8">
+            <div className="inline-block p-3 bg-indigo-100 rounded-full mb-4">
+              <Lock className="w-8 h-8 text-indigo-600" />
+            </div>
+            <h1 className="text-3xl font-bold text-gray-800 mb-2">여권 스캔 시스템</h1>
+            <p className="text-gray-600">관리자 로그인이 필요합니다</p>
+          </div>
+
+          <form onSubmit={handleLogin} className="space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                아이디
+              </label>
+              <input
+                type="text"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                placeholder="아이디를 입력하세요"
+                required
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                비밀번호
+              </label>
+              <div className="relative">
+                <input
+                  type={showPassword ? 'text' : 'password'}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent pr-12"
+                  placeholder="비밀번호를 입력하세요"
+                  required
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword(!showPassword)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-700"
+                >
+                  {showPassword ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
+                </button>
+              </div>
+            </div>
+
+            {error && (
+              <div className="flex items-center gap-2 p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">
+                <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                <span>{error}</span>
+              </div>
+            )}
+
+            <button
+              type="submit"
+              className="w-full bg-indigo-600 text-white py-3 rounded-lg font-semibold hover:bg-indigo-700 transition-colors"
+            >
+              로그인
+            </button>
+          </form>
+
+          <div className="mt-6 p-4 bg-blue-50 rounded-lg">
+            <p className="text-sm text-blue-800">
+              <strong>데모 계정:</strong><br />
+              아이디: admin<br />
+              비밀번호: travel2025!
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // 메인 화면
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-6">
+      <div className="max-w-7xl mx-auto">
+        {/* 헤더 */}
+        <div className="bg-white rounded-2xl shadow-lg p-6 mb-6">
+          <div className="flex items-center justify-between">
+            <div>
+              <h1 className="text-3xl font-bold text-gray-800 mb-2">여권 스캔 시스템</h1>
+              <p className="text-gray-600">여권 정보를 자동으로 추출하고 관리하세요</p>
+            </div>
+            <button
+              onClick={handleLogout}
+              className="flex items-center gap-2 px-4 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors"
+            >
+              <LogOut className="w-4 h-4" />
+              로그아웃
+            </button>
+          </div>
+        </div>
+
+        {/* 업로드 영역 */}
+        <div className="bg-white rounded-2xl shadow-lg p-8 mb-6">
+          <div className="text-center">
+            <div className="inline-block p-4 bg-indigo-100 rounded-full mb-4">
+              <Upload className="w-12 h-12 text-indigo-600" />
+            </div>
+            <h2 className="text-2xl font-bold text-gray-800 mb-2">여권 업로드</h2>
+            <p className="text-gray-600 mb-6">
+              여권 이미지를 업로드하거나, 이 화면에 복사-붙여넣기하세요
+            </p>
+
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              multiple
+              onChange={handleFileUpload}
+              className="hidden"
+            />
+
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              disabled={isProcessing}
+              className="px-8 py-4 bg-indigo-600 text-white rounded-lg font-semibold hover:bg-indigo-700 transition-colors disabled:bg-gray-400 disabled:cursor-not-allowed"
+            >
+              {isProcessing ? '처리중...' : '파일 선택'}
+            </button>
+
+            <div
+              onPaste={handlePaste}
+              className="mt-4 p-8 border-2 border-dashed border-gray-300 rounded-lg hover:border-indigo-400 transition-colors cursor-pointer"
+              tabIndex={0}
+            >
+              <p className="text-gray-500">또는 여기에 이미지를 붙여넣기 (Ctrl+V)</p>
+            </div>
+          </div>
+
+          {error && (
+            <div className="mt-4 flex items-center gap-2 p-4 bg-red-50 border border-red-200 rounded-lg text-red-700">
+              <AlertCircle className="w-5 h-5 flex-shrink-0" />
+              <span>{error}</span>
+            </div>
+          )}
+        </div>
+
+        {/* 데이터 테이블 */}
+        {passportData.length > 0 && (
+          <div className="bg-white rounded-2xl shadow-lg overflow-hidden">
+            <div className="p-6 border-b border-gray-200 flex items-center justify-between">
+              <div>
+                <h2 className="text-xl font-bold text-gray-800">스캔된 여권 목록</h2>
+                <p className="text-sm text-gray-600 mt-1">총 {passportData.length}개의 여권</p>
+              </div>
+              <button
+                onClick={downloadExcel}
+                className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors"
+              >
+                <Download className="w-4 h-4" />
+                CSV 다운로드
+              </button>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">No</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">성명</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">영문명</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">국적</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">발행국</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">생년월일</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">여권번호</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">만료일</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">상태</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">삭제</th>
+                  </tr>
+                </thead>
+                <tbody className="bg-white divide-y divide-gray-200">
+                  {passportData.map((item) => (
+                    <tr key={item.id} className={item.expiringSoon ? 'bg-red-50' : ''}>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{item.no}</td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{item.koreanName}</td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{item.englishName}</td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{item.nationality}</td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{item.issuingCountry}</td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{item.dateOfBirth}</td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{item.passportNumber}</td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{item.expiryDate}</td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        {item.expiringSoon && (
+                          <span className="flex items-center gap-1 px-2 py-1 bg-red-100 text-red-800 rounded-full text-xs font-semibold">
+                            <AlertCircle className="w-3 h-3" />
+                            만료 임박
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <button
+                          onClick={() => handleDelete(item.id)}
+                          className="text-red-600 hover:text-red-800"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* 안내 사항 */}
+        <div className="mt-6 bg-blue-50 border border-blue-200 rounded-lg p-4">
+          <div className="flex gap-2">
+            <AlertCircle className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" />
+            <div className="text-sm text-blue-800">
+              <p className="font-semibold mb-1">사용 안내</p>
+              <ul className="list-disc list-inside space-y-1">
+                <li>여권의 정보면(사진이 있는 페이지)을 선명하게 촬영해주세요</li>
+                <li>만료일이 6개월 미만 남은 여권은 빨간색으로 표시됩니다</li>
+                <li>데이터는 CSV 파일로 다운로드하여 엑셀에서 열 수 있습니다</li>
+                <li>이미지는 서버에 저장되지 않으며, 브라우저에서만 처리됩니다</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
